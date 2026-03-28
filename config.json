@@ -4,5 +4,18 @@
   "severity_multipliers": {
     "low": 5,
     "medium": 20
-  }
+  },
+  "safe_windows": [
+    {
+      "start": "02:00:00",
+      "end": "02:30:00",
+      "description": "Daily maintenance window"
+    },
+    {
+      "start": "22:00:00",
+      "end": "23:00:00", 
+      "description": "Weekend backup window"
+    }
+  ],
+  "timestamp_formats": ["auto", "legacy", "iso8601"]
 }

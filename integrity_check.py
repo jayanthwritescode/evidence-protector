@@ -80,6 +80,10 @@ class InputLayer:
         """Get severity multipliers from config."""
         return self.config.get('severity_multipliers', {'low': 5, 'medium': 20})
     
+    def get_safe_windows(self) -> List[Dict]:
+        """Get safe windows from config."""
+        return self.config.get('safe_windows', [])
+    
     def get_visual(self) -> bool:
         """Get visual timeline flag."""
         return self.args.visual
@@ -97,16 +101,30 @@ class ParsingLayer:
         self.malformed_count = 0
         
     def parse_timestamp(self, line: str) -> Optional[datetime]:
-        """Extract timestamp from log line using %y%m%d %H%M%S format."""
+        """Extract timestamp from log line using auto-detection."""
         try:
-            # Get first two space-separated tokens
+            # Get tokens from line
             tokens = line.strip().split(None, 2)
             if len(tokens) < 2:
                 return None
             
-            timestamp_str = f"{tokens[0]} {tokens[1]}"
-            # Parse using %y%m%d %H%M%S format
-            return datetime.strptime(timestamp_str, "%y%m%d %H%M%S")
+            # Try different timestamp formats
+            formats_to_try = [
+                # Legacy: 081109 203615 (first two tokens)
+                (f"{tokens[0]} {tokens[1]}", "%y%m%d %H%M%S"),
+                # ISO 8601: 2024-01-15T20:36:17 (first token)
+                (tokens[0], "%Y-%m-%dT%H:%M:%S"),
+                # ISO with space: 2024-01-15 20:36:17 (first two tokens)
+                (f"{tokens[0]} {tokens[1]}", "%Y-%m-%d %H:%M:%S"),
+            ]
+            
+            for timestamp_str, fmt in formats_to_try:
+                try:
+                    return datetime.strptime(timestamp_str, fmt)
+                except ValueError:
+                    continue
+            
+            return None
         except (ValueError, IndexError):
             return None
     
@@ -149,9 +167,62 @@ class ParsingLayer:
 class DetectionEngine:
     """Detects time gaps and classifies severity."""
     
-    def __init__(self, threshold: int, severity_multipliers: Dict[str, int] = None):
+    def __init__(self, threshold: int, severity_multipliers: Dict[str, int] = None, safe_windows: List[Dict] = None):
         self.threshold = threshold
         self.multipliers = severity_multipliers or {'low': 5, 'medium': 20}
+        self.safe_windows = safe_windows or []
+        
+    def parse_safe_window_time(self, time_str: str) -> Optional[datetime.time]:
+        """Parse time string from safe window config."""
+        try:
+            return datetime.strptime(time_str, "%H:%M:%S").time()
+        except ValueError:
+            return None
+    
+    def is_in_safe_window(self, timestamp: datetime) -> bool:
+        """Check if timestamp falls within any safe window."""
+        time_only = timestamp.time()
+        
+        for window in self.safe_windows:
+            start_time = self.parse_safe_window_time(window.get('start', ''))
+            end_time = self.parse_safe_window_time(window.get('end', ''))
+            
+            if start_time and end_time:
+                if start_time <= end_time:
+                    # Normal window (same day)
+                    if start_time <= time_only <= end_time:
+                        return True
+                else:
+                    # Overnight window (e.g., 22:00 to 02:00)
+                    if time_only >= start_time or time_only <= end_time:
+                        return True
+        
+        return False
+    
+    def is_gap_in_safe_window(self, gap_start: datetime, gap_end: datetime) -> bool:
+        """Check if entire gap falls within a single safe window."""
+        for window in self.safe_windows:
+            start_time = self.parse_safe_window_time(window.get('start', ''))
+            end_time = self.parse_safe_window_time(window.get('end', ''))
+            
+            if start_time and end_time:
+                # Check if both gap start and end times are within this window
+                start_in_window = self.is_time_in_window(gap_start.time(), start_time, end_time)
+                end_in_window = self.is_time_in_window(gap_end.time(), start_time, end_time)
+                
+                if start_in_window and end_in_window:
+                    return True
+        
+        return False
+    
+    def is_time_in_window(self, time_to_check: datetime.time, window_start: datetime.time, window_end: datetime.time) -> bool:
+        """Check if a time falls within a window (handles overnight windows)."""
+        if window_start <= window_end:
+            # Normal window (same day)
+            return window_start <= time_to_check <= window_end
+        else:
+            # Overnight window (e.g., 22:00 to 02:00)
+            return time_to_check >= window_start or time_to_check <= window_end
         
     def classify_severity(self, gap_seconds: int) -> str:
         """Classify gap severity based on threshold multiples."""
@@ -166,19 +237,28 @@ class DetectionEngine:
         """Detect time gaps between consecutive timestamps."""
         gaps = []
         prev_timestamp = None
+        suppressed_count = 0
         
         for timestamp in timestamps:
             if prev_timestamp is not None:
                 gap_seconds = int((timestamp - prev_timestamp).total_seconds())
                 if gap_seconds > self.threshold:
-                    gap_info = {
-                        'start': prev_timestamp,
-                        'end': timestamp,
-                        'duration': gap_seconds,
-                        'severity': self.classify_severity(gap_seconds)
-                    }
-                    gaps.append(gap_info)
+                    # Check if gap is in safe window
+                    if self.safe_windows and self.is_gap_in_safe_window(prev_timestamp, timestamp):
+                        suppressed_count += 1
+                    else:
+                        gap_info = {
+                            'start': prev_timestamp,
+                            'end': timestamp,
+                            'duration': gap_seconds,
+                            'severity': self.classify_severity(gap_seconds)
+                        }
+                        gaps.append(gap_info)
             prev_timestamp = timestamp
+        
+        # Add suppressed count to first gap for reporting
+        if gaps and suppressed_count > 0:
+            gaps[0]['suppressed_gaps'] = suppressed_count
             
         return gaps
 
@@ -193,6 +273,12 @@ class ReportingLayer:
             print(f"✓ Clean: No gaps detected in {file_path}")
             return
         
+        # Check for suppressed gaps
+        suppressed_count = 0
+        if gaps and 'suppressed_gaps' in gaps[0]:
+            suppressed_count = gaps[0]['suppressed_gaps']
+            del gaps[0]['suppressed_gaps']  # Clean up the data
+        
         # Find most suspicious gap (longest duration)
         most_suspicious = max(gaps, key=lambda g: g['duration'])
         
@@ -206,9 +292,13 @@ class ReportingLayer:
               f"Recommend investigating user activity in this period.")
         
         # Additional context for multiple gaps
+        total_gap_time = sum(gap['duration'] for gap in gaps)
         if len(gaps) > 1:
-            total_gap_time = sum(gap['duration'] for gap in gaps)
             print(f"⚠ Found {len(gaps)} gaps totaling {total_gap_time}s of missing activity")
+        
+        # Safe windows suppression info
+        if suppressed_count > 0:
+            print(f"ℹ Suppressed {suppressed_count} gaps falling within scheduled maintenance windows")
     
     @staticmethod
     def print_report(gaps: List[Dict], malformed_count: int, 
@@ -406,6 +496,7 @@ def main():
         visual_flag = input_layer.get_visual()
         quiet_flag = input_layer.get_quiet()
         severity_multipliers = input_layer.get_severity_multipliers()
+        safe_windows = input_layer.get_safe_windows()
         
         # Layer 2: Parsing
         parsing_layer = ParsingLayer(file_path)
@@ -417,7 +508,7 @@ def main():
             all_timestamps.append(ts)
         
         # Layer 3: Detection
-        detection_engine = DetectionEngine(threshold, severity_multipliers)
+        detection_engine = DetectionEngine(threshold, severity_multipliers, safe_windows)
         gaps = detection_engine.detect_gaps(iter(all_timestamps))
         
         # Get start and end times for timeline
