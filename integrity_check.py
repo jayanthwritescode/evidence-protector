@@ -31,6 +31,8 @@ class InputLayer:
                           help='Time gap threshold in seconds (default: 60)')
         parser.add_argument('--export', choices=['csv', 'json'],
                           help='Export format: csv or json')
+        parser.add_argument('--visual', action='store_true',
+                          help='Show ASCII timeline visualization')
         parser.add_argument('--config', 
                           help='Path to configuration file (default: config.json)')
         return parser.parse_args()
@@ -75,6 +77,10 @@ class InputLayer:
     def get_severity_multipliers(self) -> Dict[str, int]:
         """Get severity multipliers from config."""
         return self.config.get('severity_multipliers', {'low': 5, 'medium': 20})
+    
+    def get_visual(self) -> bool:
+        """Get visual timeline flag."""
+        return self.args.visual
 
 
 class ParsingLayer:
@@ -252,6 +258,79 @@ class ReportingLayer:
             print(f"JSON report exported to: {filename}", file=sys.stderr)
         except Exception as e:
             print(f"Error exporting JSON: {e}", file=sys.stderr)
+    
+    @staticmethod
+    def print_timeline(gaps: List[Dict], start_time: datetime, end_time: datetime):
+        """Print ASCII timeline visualization of gaps."""
+        timeline_width = 60
+        total_seconds = int((end_time - start_time).total_seconds())
+        
+        if total_seconds == 0:
+            print("Timeline: Insufficient data for visualization")
+            return
+        
+        # Create timeline character array
+        timeline = ['-'] * timeline_width
+        
+        # Mark gaps on timeline
+        for gap in gaps:
+            gap_start_offset = int((gap['start'] - start_time).total_seconds())
+            gap_end_offset = int((gap['end'] - start_time).total_seconds())
+            
+            # Convert to timeline positions
+            start_pos = int((gap_start_offset * timeline_width) / total_seconds)
+            end_pos = int((gap_end_offset * timeline_width) / total_seconds)
+            
+            # Ensure positions are within bounds
+            start_pos = max(0, min(start_pos, timeline_width - 1))
+            end_pos = max(0, min(end_pos, timeline_width - 1))
+            
+            # Mark gap with severity indicator
+            if start_pos == end_pos:
+                # Single character gap
+                timeline[start_pos] = 'G'
+            else:
+                # Multi-character gap - mark start and show severity
+                timeline[start_pos] = '['
+                # Add severity label if there's space
+                severity_label = gap['severity'][0]  # First letter: L, M, H
+                if start_pos + 1 < timeline_width:
+                    timeline[start_pos + 1] = severity_label
+                if end_pos > start_pos + 2 and end_pos < timeline_width:
+                    timeline[end_pos] = ']'
+        
+        # Format timestamps
+        start_str = start_time.strftime("%H:%M:%S")
+        end_str = end_time.strftime("%H:%M:%S")
+        
+        # Build timeline string
+        timeline_str = ''.join(timeline)
+        
+        # Add gap annotations below timeline
+        annotations = []
+        for i, char in enumerate(timeline):
+            if char == '[' and i + 1 < len(timeline):
+                severity_char = timeline[i + 1]
+                if severity_char in ['L', 'M', 'H']:
+                    # Find which gap this is
+                    gap_time_offset = int((i * total_seconds) / timeline_width)
+                    gap_time = start_time.timestamp() + gap_time_offset
+                    for gap in gaps:
+                        if abs(gap['start'].timestamp() - gap_time) < total_seconds / timeline_width:
+                            severity_map = {'L': 'LOW', 'M': 'MEDIUM', 'H': 'HIGH'}
+                            annotations.append(f"[GAP:{severity_map[severity_char]}]")
+                            break
+        
+        # Print timeline
+        print("\nTIMELINE VISUALIZATION:")
+        print("-" * 80)
+        print(f"{start_str} {timeline_str} {end_str}")
+        
+        # Print annotations if any
+        if annotations:
+            print("Gap markers:", " ".join(annotations))
+        
+        print("-" * 80)
 
 
 class ErrorHandling:
@@ -283,15 +362,28 @@ def main():
         file_path = input_layer.get_file_path()
         threshold = input_layer.get_threshold()
         export_format = input_layer.get_export_format()
+        visual_flag = input_layer.get_visual()
         severity_multipliers = input_layer.get_severity_multipliers()
         
         # Layer 2: Parsing
         parsing_layer = ParsingLayer(file_path)
         
+        # Collect all timestamps for both detection and timeline
+        all_timestamps = []
+        timestamps_iter = parsing_layer.iter_timestamps()
+        for ts in timestamps_iter:
+            all_timestamps.append(ts)
+        
         # Layer 3: Detection
         detection_engine = DetectionEngine(threshold, severity_multipliers)
-        timestamps = parsing_layer.iter_timestamps()
-        gaps = detection_engine.detect_gaps(timestamps)
+        gaps = detection_engine.detect_gaps(iter(all_timestamps))
+        
+        # Get start and end times for timeline
+        if all_timestamps:
+            start_time = all_timestamps[0]
+            end_time = all_timestamps[-1]
+        else:
+            start_time = end_time = None
         
         # Layer 4: Reporting
         ReportingLayer.print_report(
@@ -300,6 +392,10 @@ def main():
             file_path=file_path,
             threshold=threshold
         )
+        
+        # Visual timeline if requested
+        if visual_flag and start_time and end_time:
+            ReportingLayer.print_timeline(gaps, start_time, end_time)
         
         # Export if requested
         if export_format:
