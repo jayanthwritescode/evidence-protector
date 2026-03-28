@@ -1,20 +1,45 @@
-# Output artifacts from evidence-protector
+# Evidence Protector output artifacts
 gaps_report.csv
 gaps_report.json
 integrity_report.json
+*.log.bak
 
-# Python cache files
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
 
 # IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS files
 .DS_Store
+.DS_Store?
+._*
 Thumbs.db
+ehthumbs.db
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
