@@ -1,287 +1,245 @@
 #!/usr/bin/env python3
 """
-Evidence Protector - Log Integrity Checker
-Analyzes log files for time gaps, malformed entries, and integrity issues.
+Evidence Protector - Modular Log Integrity Checker
+Layered architecture for forensic log analysis.
 """
 
-import json
-import re
-import hashlib
-import os
-from datetime import datetime
-from typing import List, Dict, Tuple, Optional
 import argparse
+import json
+import sys
+from datetime import datetime
+from typing import Iterator, Optional, Dict, List
 
 
-class LogIntegrityChecker:
-    def __init__(self, config_file: str = "config.json"):
-        """Initialize the integrity checker with configuration."""
-        self.config = self.load_config(config_file)
-        self.issues = []
-        self.valid_entries = []
-        self.malformed_entries = []
+class InputLayer:
+    """Handles command line arguments and configuration loading."""
+    
+    def __init__(self):
+        self.args = self._parse_arguments()
+        self.config = self._load_config()
         
-    def load_config(self, config_file: str) -> Dict:
-        """Load configuration from JSON file."""
+    def _parse_arguments(self) -> argparse.Namespace:
+        """Parse command line arguments."""
+        parser = argparse.ArgumentParser(
+            description='Modular Log Integrity Checker',
+            formatter_class=argparse.RawDescriptionHelpFormatter
+        )
+        parser.add_argument('--file', required=True, 
+                          help='Path to the log file to analyze')
+        parser.add_argument('--threshold', type=int, default=60,
+                          help='Time gap threshold in seconds (default: 60)')
+        parser.add_argument('--config', 
+                          help='Path to configuration file (default: config.json)')
+        return parser.parse_args()
+    
+    def _load_config(self) -> Dict:
+        """Load configuration from JSON file if provided."""
+        config_file = self.args.config or 'config.json'
         try:
             with open(config_file, 'r') as f:
-                return json.load(f)
+                config = json.load(f)
+                # Override defaults with command line args
+                if self.args.threshold != 60:
+                    config['threshold'] = self.args.threshold
+                return config
         except FileNotFoundError:
-            print(f"Configuration file {config_file} not found!")
-            return {}
+            # Config file is optional
+            return {'threshold': self.args.threshold}
         except json.JSONDecodeError as e:
-            print(f"Invalid JSON in configuration file: {e}")
-            return {}
+            print(f"Warning: Invalid JSON in config file: {e}", file=sys.stderr)
+            return {'threshold': self.args.threshold}
     
-    def parse_timestamp(self, timestamp_str: str) -> Optional[datetime]:
-        """Parse timestamp string according to configured format."""
+    def get_file_path(self) -> str:
+        """Get the log file path."""
+        return self.args.file
+    
+    def get_threshold(self) -> int:
+        """Get the time gap threshold."""
+        return self.config.get('threshold', self.args.threshold)
+
+
+class ParsingLayer:
+    """Handles memory-efficient line-by-line log parsing."""
+    
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self.malformed_count = 0
+        
+    def parse_timestamp(self, line: str) -> Optional[datetime]:
+        """Extract timestamp from log line using %y%m%d %H%M%S format."""
         try:
-            # Handle YYMMDD HHMMSS format
-            if len(timestamp_str) == 13 and timestamp_str[6] == ' ':
-                date_part = timestamp_str[:6]
-                time_part = timestamp_str[7:]
-                
-                # Convert YY to 4-digit year (assuming 2000s)
-                year = 2000 + int(date_part[:2])
-                month = int(date_part[2:4])
-                day = int(date_part[4:6])
-                
-                hour = int(time_part[:2])
-                minute = int(time_part[2:4])
-                second = int(time_part[4:6])
-                
-                return datetime(year, month, day, hour, minute, second)
-            else:
+            # Get first two space-separated tokens
+            tokens = line.strip().split(None, 2)
+            if len(tokens) < 2:
                 return None
+            
+            timestamp_str = f"{tokens[0]} {tokens[1]}"
+            # Parse using %y%m%d %H%M%S format
+            return datetime.strptime(timestamp_str, "%y%m%d %H%M%S")
         except (ValueError, IndexError):
             return None
     
-    def parse_log_line(self, line: str) -> Optional[Dict]:
-        """Parse a single log line and extract components."""
-        line = line.strip()
-        if not line:
-            return None
-            
-        # Expected format: YYMMDD HHMMSS PID LEVEL COMPONENT: MESSAGE
-        pattern = r'^(\d{6} \d{6})\s+(\d+)\s+(\w+)\s+([^:]+):\s+(.*)$'
-        match = re.match(pattern, line)
-        
-        if match:
-            timestamp_str, pid, level, component, message = match.groups()
-            timestamp = self.parse_timestamp(timestamp_str)
-            
-            if timestamp:
-                return {
-                    'timestamp': timestamp,
-                    'timestamp_str': timestamp_str,
-                    'pid': pid,
-                    'level': level,
-                    'component': component,
-                    'message': message,
-                    'raw_line': line
-                }
-            else:
-                self.malformed_entries.append({
-                    'line': line,
-                    'issue': 'Invalid timestamp format'
-                })
-                return None
-        else:
-            # Check for specific malformed patterns
-            if not re.match(r'^\d{6} \d{6}', line):
-                self.malformed_entries.append({
-                    'line': line,
-                    'issue': 'Missing or invalid timestamp'
-                })
-            else:
-                self.malformed_entries.append({
-                    'line': line,
-                    'issue': 'Malformed log structure'
-                })
-            return None
-    
-    def detect_time_gaps(self) -> List[Dict]:
-        """Detect significant time gaps between consecutive log entries."""
-        gaps = []
-        thresholds = self.config.get('time_gap_thresholds', {
-            'warning': 60, 'critical': 300, 'severe': 1200
-        })
-        
-        for i in range(1, len(self.valid_entries)):
-            prev_time = self.valid_entries[i-1]['timestamp']
-            curr_time = self.valid_entries[i]['timestamp']
-            gap_seconds = (curr_time - prev_time).total_seconds()
-            
-            if gap_seconds > thresholds['warning']:
-                severity = 'warning'
-                if gap_seconds > thresholds['severe']:
-                    severity = 'severe'
-                elif gap_seconds > thresholds['critical']:
-                    severity = 'critical'
-                
-                gaps.append({
-                    'from_line': i,
-                    'to_line': i + 1,
-                    'gap_seconds': gap_seconds,
-                    'severity': severity,
-                    'from_timestamp': prev_time.strftime('%Y-%m-%d %H:%M:%S'),
-                    'to_timestamp': curr_time.strftime('%Y-%m-%d %H:%M:%S')
-                })
-        
-        return gaps
-    
-    def detect_duplicates(self) -> List[Dict]:
-        """Detect duplicate log entries."""
-        seen_lines = set()
-        duplicates = []
-        
-        for i, entry in enumerate(self.valid_entries):
-            line_hash = hashlib.md5(entry['raw_line'].encode()).hexdigest()
-            if line_hash in seen_lines:
-                duplicates.append({
-                    'line_number': i + 1,
-                    'duplicate_line': entry['raw_line'],
-                    'hash': line_hash
-                })
-            else:
-                seen_lines.add(line_hash)
-        
-        return duplicates
-    
-    def calculate_file_checksum(self, filepath: str) -> str:
-        """Calculate SHA-256 checksum of the log file."""
-        hash_sha256 = hashlib.sha256()
+    def iter_timestamps(self) -> Iterator[datetime]:
+        """Iterate over valid timestamps from the log file."""
         try:
-            with open(filepath, 'rb') as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    hash_sha256.update(chunk)
-            return hash_sha256.hexdigest()
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    timestamp = self.parse_timestamp(line)
+                    if timestamp:
+                        yield timestamp
+                    else:
+                        self.malformed_count += 1
+                        # Silent skip - count only
         except FileNotFoundError:
-            return ""
-    
-    def analyze_log_file(self, filepath: str) -> Dict:
-        """Perform comprehensive analysis of the log file."""
-        if not os.path.exists(filepath):
-            return {'error': f'Log file {filepath} not found'}
-        
-        # Read and parse log file
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+            print(f"Error: File not found: {self.file_path}", file=sys.stderr)
+            raise
         except UnicodeDecodeError:
-            with open(filepath, 'r', encoding='latin-1') as f:
-                lines = f.readlines()
-        
-        # Parse each line
-        for line_num, line in enumerate(lines, 1):
-            parsed = self.parse_log_line(line)
-            if parsed:
-                parsed['line_number'] = line_num
-                self.valid_entries.append(parsed)
-        
-        # Perform integrity checks
-        time_gaps = self.detect_time_gaps() if self.config.get('integrity_checks', {}).get('detect_gaps', True) else []
-        duplicates = self.detect_duplicates() if self.config.get('integrity_checks', {}).get('detect_duplicates', True) else []
-        
-        # Calculate file checksum
-        checksum = self.calculate_file_checksum(filepath) if self.config.get('security', {}).get('calculate_checksum', True) else ""
-        
-        # Generate report
-        report = {
-            'analysis_timestamp': datetime.now().isoformat(),
-            'log_file': filepath,
-            'file_checksum': checksum,
-            'total_lines': len(lines),
-            'valid_entries': len(self.valid_entries),
-            'malformed_entries': len(self.malformed_entries),
-            'issues': {
-                'time_gaps': time_gaps,
-                'duplicates': duplicates,
-                'malformed_entries': self.malformed_entries
-            },
-            'summary': {
-                'critical_issues': len([g for g in time_gaps if g['severity'] in ['critical', 'severe']]),
-                'warnings': len([g for g in time_gaps if g['severity'] == 'warning']) + len(duplicates),
-                'malformed_count': len(self.malformed_entries)
-            }
-        }
-        
-        return report
-    
-    def save_report(self, report: Dict, output_file: str = None):
-        """Save analysis report to JSON file."""
-        if output_file is None:
-            output_file = self.config.get('output', {}).get('report_file', 'integrity_report.json')
-        
-        try:
-            with open(output_file, 'w') as f:
-                json.dump(report, f, indent=2, default=str)
-            print(f"Report saved to {output_file}")
+            # Try with different encoding
+            try:
+                with open(self.file_path, 'r', encoding='latin-1') as f:
+                    for line_num, line in enumerate(f, 1):
+                        timestamp = self.parse_timestamp(line)
+                        if timestamp:
+                            yield timestamp
+                        else:
+                            self.malformed_count += 1
+            except Exception as e:
+                print(f"Error reading file: {e}", file=sys.stderr)
+                raise
         except Exception as e:
-            print(f"Error saving report: {e}")
+            print(f"Unexpected error parsing file: {e}", file=sys.stderr)
+            raise
     
-    def print_summary(self, report: Dict):
-        """Print a summary of the analysis results."""
-        print("\n" + "="*60)
-        print("LOG INTEGRITY ANALYSIS SUMMARY")
-        print("="*60)
-        print(f"Log file: {report['log_file']}")
-        print(f"Total lines: {report['total_lines']}")
-        print(f"Valid entries: {report['valid_entries']}")
-        print(f"Malformed entries: {report['malformed_entries']}")
+    def get_malformed_count(self) -> int:
+        """Get the count of malformed lines."""
+        return self.malformed_count
+
+
+class DetectionEngine:
+    """Detects time gaps and classifies severity."""
+    
+    def __init__(self, threshold: int):
+        self.threshold = threshold
         
-        if report['file_checksum']:
-            print(f"File checksum: {report['file_checksum'][:16]}...")
+    def classify_severity(self, gap_seconds: int) -> str:
+        """Classify gap severity based on threshold multiples."""
+        if gap_seconds <= self.threshold:
+            return "LOW"
+        elif gap_seconds <= 5 * self.threshold:
+            return "LOW"
+        elif gap_seconds <= 20 * self.threshold:
+            return "MEDIUM"
+        else:
+            return "HIGH"
+    
+    def detect_gaps(self, timestamps: Iterator[datetime]) -> List[Dict]:
+        """Detect time gaps between consecutive timestamps."""
+        gaps = []
+        prev_timestamp = None
         
-        summary = report['summary']
-        print(f"\nCritical issues: {summary['critical_issues']}")
-        print(f"Warnings: {summary['warnings']}")
-        print(f"Malformed lines: {summary['malformed_count']}")
+        for timestamp in timestamps:
+            if prev_timestamp is not None:
+                gap_seconds = int((timestamp - prev_timestamp).total_seconds())
+                if gap_seconds > self.threshold:
+                    gap_info = {
+                        'start': prev_timestamp,
+                        'end': timestamp,
+                        'duration': gap_seconds,
+                        'severity': self.classify_severity(gap_seconds)
+                    }
+                    gaps.append(gap_info)
+            prev_timestamp = timestamp
+            
+        return gaps
+
+
+class ReportingLayer:
+    """Generates clean forensic reports."""
+    
+    @staticmethod
+    def print_report(gaps: List[Dict], malformed_count: int, 
+                     file_path: str, threshold: int):
+        """Print forensic report to stdout."""
+        print("=" * 80)
+        print("LOG INTEGRITY FORENSIC REPORT")
+        print("=" * 80)
+        print(f"File Scanned: {file_path}")
+        print(f"Threshold Used: {threshold} seconds")
+        print()
         
-        # Show time gaps
-        if report['issues']['time_gaps']:
-            print(f"\nTime gaps detected ({len(report['issues']['time_gaps'])}):")
-            for gap in report['issues']['time_gaps']:
-                print(f"  {gap['severity'].upper()}: {gap['gap_seconds']:.0f}s gap "
-                      f"between line {gap['from_line']} and {gap['to_line']}")
+        if not gaps:
+            print("No time gaps detected.")
+        else:
+            print("TIME GAPS DETECTED:")
+            print("-" * 80)
+            print(f"{'Start Time':<20} {'End Time':<20} {'Duration (s)':<15} {'Severity':<10}")
+            print("-" * 80)
+            
+            for gap in gaps:
+                start_str = gap['start'].strftime("%Y-%m-%d %H:%M:%S")
+                end_str = gap['end'].strftime("%Y-%m-%d %H:%M:%S")
+                print(f"{start_str:<20} {end_str:<20} {gap['duration']:<15} {gap['severity']:<10}")
         
-        # Show malformed entries
-        if report['issues']['malformed_entries']:
-            print(f"\nMalformed entries ({len(report['issues']['malformed_entries'])}):")
-            for i, entry in enumerate(report['issues']['malformed_entries'][:5]):
-                print(f"  - {entry['issue']}: {entry['line'][:50]}...")
-            if len(report['issues']['malformed_entries']) > 5:
-                print(f"  ... and {len(report['issues']['malformed_entries']) - 5} more")
-        
-        print("="*60)
+        print()
+        print("=" * 80)
+        print("SUMMARY:")
+        print(f"  Total Gaps Detected: {len(gaps)}")
+        print(f"  Total Malformed Lines: {malformed_count}")
+        print(f"  File Scanned: {file_path}")
+        print(f"  Threshold Used: {threshold} seconds")
+        print("=" * 80)
+
+
+class ErrorHandling:
+    """Centralized error handling."""
+    
+    @staticmethod
+    def handle_file_not_found(file_path: str):
+        """Handle file not found errors."""
+        print(f"FATAL: Log file not found: {file_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    @staticmethod
+    def handle_parsing_error(error: Exception, file_path: str):
+        """Handle parsing errors."""
+        print(f"FATAL: Error parsing file {file_path}: {error}", file=sys.stderr)
+        sys.exit(1)
+    
+    @staticmethod
+    def handle_config_error(error: Exception):
+        """Handle configuration errors."""
+        print(f"WARNING: Configuration error: {error}", file=sys.stderr)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Log Integrity Checker')
-    parser.add_argument('log_file', nargs='?', default='sample.log', 
-                       help='Path to the log file to analyze')
-    parser.add_argument('-c', '--config', default='config.json',
-                       help='Path to configuration file')
-    parser.add_argument('-o', '--output', help='Output report file')
-    parser.add_argument('-v', '--verbose', action='store_true',
-                       help='Verbose output')
-    
-    args = parser.parse_args()
-    
-    checker = LogIntegrityChecker(args.config)
-    report = checker.analyze_log_file(args.log_file)
-    
-    if 'error' in report:
-        print(f"Error: {report['error']}")
-        return 1
-    
-    checker.print_summary(report)
-    
-    if args.config and checker.config.get('output', {}).get('save_report', True):
-        checker.save_report(report, args.output)
-    
-    return 0
+    """Main execution function."""
+    try:
+        # Layer 1: Input
+        input_layer = InputLayer()
+        file_path = input_layer.get_file_path()
+        threshold = input_layer.get_threshold()
+        
+        # Layer 2: Parsing
+        parsing_layer = ParsingLayer(file_path)
+        
+        # Layer 3: Detection
+        detection_engine = DetectionEngine(threshold)
+        timestamps = parsing_layer.iter_timestamps()
+        gaps = detection_engine.detect_gaps(timestamps)
+        
+        # Layer 4: Reporting
+        ReportingLayer.print_report(
+            gaps=gaps,
+            malformed_count=parsing_layer.get_malformed_count(),
+            file_path=file_path,
+            threshold=threshold
+        )
+        
+    except FileNotFoundError as e:
+        ErrorHandling.handle_file_not_found(file_path)
+    except Exception as e:
+        ErrorHandling.handle_parsing_error(e, file_path if 'file_path' in locals() else "unknown")
 
 
 if __name__ == "__main__":
-    exit(main())
+    main()
