@@ -33,6 +33,8 @@ class InputLayer:
                           help='Export format: csv or json')
         parser.add_argument('--visual', action='store_true',
                           help='Show ASCII timeline visualization')
+        parser.add_argument('--quiet', action='store_true',
+                          help='Suppress output except summary insights')
         parser.add_argument('--config', 
                           help='Path to configuration file (default: config.json)')
         return parser.parse_args()
@@ -81,6 +83,10 @@ class InputLayer:
     def get_visual(self) -> bool:
         """Get visual timeline flag."""
         return self.args.visual
+    
+    def get_quiet(self) -> bool:
+        """Get quiet mode flag."""
+        return self.args.quiet
 
 
 class ParsingLayer:
@@ -179,6 +185,30 @@ class DetectionEngine:
 
 class ReportingLayer:
     """Generates clean forensic reports and exports data."""
+    
+    @staticmethod
+    def print_summary_insights(gaps: List[Dict], file_path: str, threshold: int):
+        """Print analyst-focused summary insights."""
+        if not gaps:
+            print(f"✓ Clean: No gaps detected in {file_path}")
+            return
+        
+        # Find most suspicious gap (longest duration)
+        most_suspicious = max(gaps, key=lambda g: g['duration'])
+        
+        # Format time window
+        start_time = most_suspicious['start'].strftime("%H:%M")
+        end_time = most_suspicious['end'].strftime("%H:%M")
+        duration = most_suspicious['duration']
+        severity = most_suspicious['severity']
+        
+        print(f"⚠ Most suspicious window: {start_time}-{end_time} ({severity}, {duration}s). "
+              f"Recommend investigating user activity in this period.")
+        
+        # Additional context for multiple gaps
+        if len(gaps) > 1:
+            total_gap_time = sum(gap['duration'] for gap in gaps)
+            print(f"⚠ Found {len(gaps)} gaps totaling {total_gap_time}s of missing activity")
     
     @staticmethod
     def print_report(gaps: List[Dict], malformed_count: int, 
@@ -374,6 +404,7 @@ def main():
         threshold = input_layer.get_threshold()
         export_format = input_layer.get_export_format()
         visual_flag = input_layer.get_visual()
+        quiet_flag = input_layer.get_quiet()
         severity_multipliers = input_layer.get_severity_multipliers()
         
         # Layer 2: Parsing
@@ -397,16 +428,20 @@ def main():
             start_time = end_time = None
         
         # Layer 4: Reporting
-        ReportingLayer.print_report(
-            gaps=gaps,
-            malformed_count=parsing_layer.get_malformed_count(),
-            file_path=file_path,
-            threshold=threshold
-        )
+        if not quiet_flag:
+            ReportingLayer.print_report(
+                gaps=gaps,
+                malformed_count=parsing_layer.get_malformed_count(),
+                file_path=file_path,
+                threshold=threshold
+            )
         
-        # Visual timeline if requested
-        if visual_flag and start_time and end_time:
+        # Visual timeline if requested and not quiet
+        if visual_flag and not quiet_flag and start_time and end_time:
             ReportingLayer.print_timeline(gaps, start_time, end_time)
+        
+        # Always print summary insights (even in quiet mode)
+        ReportingLayer.print_summary_insights(gaps, file_path, threshold)
         
         # Export if requested
         if export_format:
@@ -422,6 +457,9 @@ def main():
             elif export_format == 'json':
                 ReportingLayer.export_json(gaps, metadata)
         
+        # Exit code: 1 if gaps found, 0 if clean
+        return 1 if gaps else 0
+        
     except FileNotFoundError as e:
         ErrorHandling.handle_file_not_found(file_path)
     except Exception as e:
@@ -429,4 +467,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())
