@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "file": "sample.log",
+    "threshold": 60,
+    "total_gaps": 3,
+    "malformed_lines": 2
+  },
+  "gaps": [
+    {
+      "start": "2008-11-09 20:36:32",
+      "end": "2008-11-09 20:39:12",
+      "duration_seconds": 160,
+      "severity": "LOW"
+    },
+    {
+      "start": "2008-11-09 20:39:20",
+      "end": "2008-11-09 20:51:12",
+      "duration_seconds": 712,
+      "severity": "MEDIUM"
+    },
+    {
+      "start": "2008-11-09 20:51:24",
+      "end": "2008-11-09 22:50:24",
+      "duration_seconds": 7140,
+      "severity": "HIGH"
+    }
+  ]
+}

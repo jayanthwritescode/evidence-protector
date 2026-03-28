@@ -5,6 +5,7 @@ Layered architecture for forensic log analysis.
 """
 
 import argparse
+import csv
 import json
 import sys
 from datetime import datetime
@@ -28,6 +29,8 @@ class InputLayer:
                           help='Path to the log file to analyze')
         parser.add_argument('--threshold', type=int, default=60,
                           help='Time gap threshold in seconds (default: 60)')
+        parser.add_argument('--export', choices=['csv', 'json'],
+                          help='Export format: csv or json')
         parser.add_argument('--config', 
                           help='Path to configuration file (default: config.json)')
         return parser.parse_args()
@@ -41,13 +44,21 @@ class InputLayer:
                 # Override defaults with command line args
                 if self.args.threshold != 60:
                     config['threshold'] = self.args.threshold
+                if self.args.export:
+                    config['export'] = self.args.export
                 return config
         except FileNotFoundError:
             # Config file is optional
-            return {'threshold': self.args.threshold}
+            config = {'threshold': self.args.threshold}
+            if self.args.export:
+                config['export'] = self.args.export
+            return config
         except json.JSONDecodeError as e:
             print(f"Warning: Invalid JSON in config file: {e}", file=sys.stderr)
-            return {'threshold': self.args.threshold}
+            config = {'threshold': self.args.threshold}
+            if self.args.export:
+                config['export'] = self.args.export
+            return config
     
     def get_file_path(self) -> str:
         """Get the log file path."""
@@ -56,6 +67,14 @@ class InputLayer:
     def get_threshold(self) -> int:
         """Get the time gap threshold."""
         return self.config.get('threshold', self.args.threshold)
+    
+    def get_export_format(self) -> Optional[str]:
+        """Get the export format."""
+        return self.config.get('export')
+    
+    def get_severity_multipliers(self) -> Dict[str, int]:
+        """Get severity multipliers from config."""
+        return self.config.get('severity_multipliers', {'low': 5, 'medium': 20})
 
 
 class ParsingLayer:
@@ -118,16 +137,17 @@ class ParsingLayer:
 class DetectionEngine:
     """Detects time gaps and classifies severity."""
     
-    def __init__(self, threshold: int):
+    def __init__(self, threshold: int, severity_multipliers: Dict[str, int] = None):
         self.threshold = threshold
+        self.multipliers = severity_multipliers or {'low': 5, 'medium': 20}
         
     def classify_severity(self, gap_seconds: int) -> str:
         """Classify gap severity based on threshold multiples."""
         if gap_seconds <= self.threshold:
             return "LOW"
-        elif gap_seconds <= 5 * self.threshold:
+        elif gap_seconds <= self.multipliers['low'] * self.threshold:
             return "LOW"
-        elif gap_seconds <= 20 * self.threshold:
+        elif gap_seconds <= self.multipliers['medium'] * self.threshold:
             return "MEDIUM"
         else:
             return "HIGH"
@@ -154,7 +174,7 @@ class DetectionEngine:
 
 
 class ReportingLayer:
-    """Generates clean forensic reports."""
+    """Generates clean forensic reports and exports data."""
     
     @staticmethod
     def print_report(gaps: List[Dict], malformed_count: int, 
@@ -188,6 +208,50 @@ class ReportingLayer:
         print(f"  File Scanned: {file_path}")
         print(f"  Threshold Used: {threshold} seconds")
         print("=" * 80)
+    
+    @staticmethod
+    def export_csv(gaps: List[Dict], filename: str = "gaps_report.csv"):
+        """Export gaps to CSV format."""
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['start', 'end', 'duration_seconds', 'severity']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                writer.writeheader()
+                for gap in gaps:
+                    writer.writerow({
+                        'start': gap['start'].strftime("%Y-%m-%d %H:%M:%S"),
+                        'end': gap['end'].strftime("%Y-%m-%d %H:%M:%S"),
+                        'duration_seconds': gap['duration'],
+                        'severity': gap['severity']
+                    })
+            print(f"CSV report exported to: {filename}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error exporting CSV: {e}", file=sys.stderr)
+    
+    @staticmethod
+    def export_json(gaps: List[Dict], metadata: Dict, filename: str = "gaps_report.json"):
+        """Export gaps to JSON format with metadata."""
+        try:
+            report_data = {
+                'metadata': metadata,
+                'gaps': []
+            }
+            
+            for gap in gaps:
+                gap_data = {
+                    'start': gap['start'].strftime("%Y-%m-%d %H:%M:%S"),
+                    'end': gap['end'].strftime("%Y-%m-%d %H:%M:%S"),
+                    'duration_seconds': gap['duration'],
+                    'severity': gap['severity']
+                }
+                report_data['gaps'].append(gap_data)
+            
+            with open(filename, 'w', encoding='utf-8') as jsonfile:
+                json.dump(report_data, jsonfile, indent=2)
+            print(f"JSON report exported to: {filename}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error exporting JSON: {e}", file=sys.stderr)
 
 
 class ErrorHandling:
@@ -218,12 +282,14 @@ def main():
         input_layer = InputLayer()
         file_path = input_layer.get_file_path()
         threshold = input_layer.get_threshold()
+        export_format = input_layer.get_export_format()
+        severity_multipliers = input_layer.get_severity_multipliers()
         
         # Layer 2: Parsing
         parsing_layer = ParsingLayer(file_path)
         
         # Layer 3: Detection
-        detection_engine = DetectionEngine(threshold)
+        detection_engine = DetectionEngine(threshold, severity_multipliers)
         timestamps = parsing_layer.iter_timestamps()
         gaps = detection_engine.detect_gaps(timestamps)
         
@@ -234,6 +300,20 @@ def main():
             file_path=file_path,
             threshold=threshold
         )
+        
+        # Export if requested
+        if export_format:
+            metadata = {
+                'file': file_path,
+                'threshold': threshold,
+                'total_gaps': len(gaps),
+                'malformed_lines': parsing_layer.get_malformed_count()
+            }
+            
+            if export_format == 'csv':
+                ReportingLayer.export_csv(gaps)
+            elif export_format == 'json':
+                ReportingLayer.export_json(gaps, metadata)
         
     except FileNotFoundError as e:
         ErrorHandling.handle_file_not_found(file_path)

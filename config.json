@@ -1,24 +1,8 @@
 {
-  "log_file": "sample.log",
-  "timestamp_format": "YYMMDD HHMMSS",
-  "time_gap_thresholds": {
-    "warning": 60,
-    "critical": 300,
-    "severe": 1200
-  },
-  "integrity_checks": {
-    "detect_gaps": true,
-    "detect_malformed": true,
-    "detect_duplicates": true,
-    "validate_timestamps": true
-  },
-  "output": {
-    "verbose": false,
-    "save_report": true,
-    "report_file": "integrity_report.json"
-  },
-  "security": {
-    "calculate_checksum": true,
-    "backup_original": true
+  "threshold": 60,
+  "export": "json",
+  "severity_multipliers": {
+    "low": 5,
+    "medium": 20
   }
 }
