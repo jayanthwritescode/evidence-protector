@@ -390,11 +390,11 @@ class ReportingLayer:
         # Create timeline character array
         timeline = ['-'] * timeline_width
         
-        # Track gap positions for inline labels
-        gap_positions = []
+        # Sort gaps by severity to ensure proper rendering order
+        sorted_gaps = sorted(gaps, key=lambda g: g['duration'], reverse=True)
         
         # Mark gaps on timeline
-        for gap in gaps:
+        for gap in sorted_gaps:
             gap_start_offset = int((gap['start'] - start_time).total_seconds())
             gap_end_offset = int((gap['end'] - start_time).total_seconds())
             
@@ -406,39 +406,30 @@ class ReportingLayer:
             start_pos = max(0, min(start_pos, timeline_width - 1))
             end_pos = max(0, min(end_pos, timeline_width - 1))
             
-            # Create inline label with duration
-            duration_str = f"GAP:{gap['severity']} {gap['duration']}s"
-            
-            # Try to fit the label in the gap
-            available_space = end_pos - start_pos - 2  # Account for brackets
-            
-            if available_space >= len(duration_str):
-                # Full label fits
-                timeline[start_pos] = '['
-                for i, char in enumerate(duration_str):
-                    if start_pos + 1 + i < timeline_width:
-                        timeline[start_pos + 1 + i] = char
-                if end_pos < timeline_width:
-                    timeline[end_pos] = ']'
-                gap_positions.append((start_pos, duration_str))
-            elif available_space >= 8:  # Minimum for "GAP:X Ys"
-                # Shortened label
-                short_label = f"G:{gap['severity'][0]} {gap['duration']}s"
-                timeline[start_pos] = '['
-                for i, char in enumerate(short_label):
-                    if start_pos + 1 + i < timeline_width:
-                        timeline[start_pos + 1 + i] = char
-                if end_pos < timeline_width:
-                    timeline[end_pos] = ']'
-                gap_positions.append((start_pos, short_label))
+            # Create severity label
+            if start_pos == end_pos:
+                # Single character gap - just mark with severity letter
+                timeline[start_pos] = gap['severity'][0]  # L, M, H
             else:
-                # Just mark with severity letter
-                timeline[start_pos] = '['
-                if start_pos + 1 < timeline_width:
-                    timeline[start_pos + 1] = gap['severity'][0]  # L, M, H
-                if end_pos > start_pos + 2 and end_pos < timeline_width:
+                # Multi-character gap
+                available_space = end_pos - start_pos - 1
+                
+                if available_space >= 3:
+                    # Mark start and end with brackets, show severity in middle
+                    timeline[start_pos] = '['
                     timeline[end_pos] = ']'
-                gap_positions.append((start_pos, gap['severity'][0]))
+                    
+                    # Add severity letter in middle if space allows
+                    middle_pos = (start_pos + end_pos) // 2
+                    if middle_pos > start_pos + 1 and middle_pos < end_pos - 1:
+                        timeline[middle_pos] = gap['severity'][0]
+                elif available_space >= 1:
+                    # Just mark start and end
+                    timeline[start_pos] = '['
+                    timeline[end_pos] = ']'
+                else:
+                    # Single position - just severity letter
+                    timeline[start_pos] = gap['severity'][0]
         
         # Format timestamps
         start_str = start_time.strftime("%H:%M:%S")
@@ -452,14 +443,14 @@ class ReportingLayer:
         print("-" * 80)
         print(f"{start_str} {timeline_str} {end_str}")
         
-        # Print gap annotations for any that might be unclear
-        annotations = []
-        for pos, label in gap_positions:
-            if isinstance(label, str) and len(label) > 3:  # Only annotate complex labels
-                annotations.append(label)
+        # Print gap annotations
+        gap_labels = []
+        for gap in gaps:
+            duration_str = f"{gap['severity']} {gap['duration']}s"
+            gap_labels.append(duration_str)
         
-        if annotations:
-            print("Gap markers:", " ".join(annotations))
+        if gap_labels:
+            print("Gap markers:", " | ".join(gap_labels))
         
         print("-" * 80)
 
@@ -534,8 +525,8 @@ def main():
         # Always print summary insights (even in quiet mode)
         ReportingLayer.print_summary_insights(gaps, file_path, threshold)
         
-        # Export if requested
-        if export_format:
+        # Export if requested (but not in quiet mode unless explicitly asked)
+        if export_format and not quiet_flag:
             metadata = {
                 'file': file_path,
                 'threshold': threshold,

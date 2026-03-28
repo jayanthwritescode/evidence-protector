@@ -1,6 +1,5 @@
 {
   "threshold": 60,
-  "export": "json",
   "severity_multipliers": {
     "low": 5,
     "medium": 20
