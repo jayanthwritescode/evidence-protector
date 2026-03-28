@@ -106,7 +106,7 @@ file -> parser -> detector -> reporter -> stdout/file
 ### Tradeoffs and Limitations
 - **Assumes chronological order**: Processes timestamps sequentially. Out-of-order logs may produce inaccurate gap detection.
 - **Single timestamp format**: Only supports `%y%m%d %H%M%S` format for consistency.
-- **Memory tradeoff**: Collects all timestamps in memory for timeline visualization (can be disabled with --no-visual flag).
+- **Memory tradeoff for visual mode**: Visual timeline collects all timestamps in memory to provide accurate gap positioning. This trades memory for timeline accuracy. Non-visual mode maintains true streaming behavior.
 
 ### User Value
 **Actionable output for analysts under time pressure**. Clear forensic reports with:

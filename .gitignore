@@ -1,0 +1,20 @@
+# Output artifacts from evidence-protector
+gaps_report.csv
+gaps_report.json
+integrity_report.json
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
